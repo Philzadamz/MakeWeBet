@@ -1,40 +1,58 @@
 import axios, { AxiosError } from 'axios';
 
 /**
- * Single API client. Access token lives in memory only; the refresh token is
- * kept in localStorage for now (documented tradeoff — moves to an httpOnly
- * cookie flow before production) and rotated on every refresh.
+ * Single API client. Access token lives in memory only; the refresh token
+ * lives in an httpOnly SameSite=Strict cookie set by the API (rides the
+ * same-origin Next proxy) — JavaScript never sees it. localStorage keeps
+ * only a boolean "we have a session" hint for silent-restore on load.
  */
 export const api = axios.create({ baseURL: '/api/v1' });
 
-const RT_KEY = 'fiq.rt';
+const LEGACY_RT_KEY = 'fiq.rt'; // pre-cookie storage; migrated then removed
+const SESSION_FLAG = 'fiq.session';
 let accessToken: string | null = null;
 
-export function setTokens(tokens: { accessToken: string; refreshToken?: string }): void {
+export function setTokens(tokens: { accessToken: string }): void {
   accessToken = tokens.accessToken;
-  if (tokens.refreshToken) localStorage.setItem(RT_KEY, tokens.refreshToken);
+  localStorage.setItem(SESSION_FLAG, '1');
 }
 
 export function clearTokens(): void {
   accessToken = null;
-  localStorage.removeItem(RT_KEY);
+  localStorage.removeItem(SESSION_FLAG);
+  localStorage.removeItem(LEGACY_RT_KEY);
 }
 
 export function hasSession(): boolean {
-  return typeof window !== 'undefined' && localStorage.getItem(RT_KEY) !== null;
+  if (typeof window === 'undefined') return false;
+  return localStorage.getItem(SESSION_FLAG) === '1' || localStorage.getItem(LEGACY_RT_KEY) !== null;
 }
 
 export async function refreshSession(): Promise<boolean> {
-  const rt = localStorage.getItem(RT_KEY);
-  if (!rt) return false;
+  // One-time migration: send a legacy localStorage token in the body; the
+  // response sets the cookie and the local copy is deleted forever.
+  const legacy = localStorage.getItem(LEGACY_RT_KEY);
   try {
-    const { data } = await axios.post('/api/v1/auth/refresh', { refreshToken: rt });
+    const { data } = await axios.post(
+      '/api/v1/auth/refresh',
+      legacy ? { refreshToken: legacy } : {},
+    );
+    localStorage.removeItem(LEGACY_RT_KEY);
     setTokens(data);
     return true;
   } catch {
     clearTokens();
     return false;
   }
+}
+
+export async function serverLogout(): Promise<void> {
+  try {
+    await axios.post('/api/v1/auth/logout', {});
+  } catch {
+    // Best effort — local state is cleared regardless.
+  }
+  clearTokens();
 }
 
 api.interceptors.request.use((config) => {

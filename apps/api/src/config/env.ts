@@ -38,6 +38,10 @@ const EnvSchema = z.object({
   FOOTBALL_DATA_KEY: z.string().optional().default(''),
 
   PII_ENCRYPTION_KEY: z.string().regex(/^[0-9a-f]{64}$/i, '32-byte hex key required'),
+
+  /** SMTP transport, e.g. smtp://localhost:1025 (Mailpit) or SES SMTP creds. */
+  SMTP_URL: z.string().optional().default(''),
+  EMAIL_FROM: z.string().default('Football IQ <no-reply@fiq.local>'),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

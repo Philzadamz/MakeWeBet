@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, clearTokens, hasSession, refreshSession, setTokens } from './api';
+import { api, hasSession, refreshSession, serverLogout, setTokens } from './api';
 
 export interface Me {
   id: string;
@@ -44,7 +44,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     queryFn: async () => (await api.get<Me>('/users/me')).data,
   });
 
-  const applyTokens = async (data: { accessToken: string; refreshToken?: string }) => {
+  const applyTokens = async (data: { accessToken: string }) => {
     setTokens(data);
     setAuthed(true);
     await queryClient.invalidateQueries();
@@ -62,7 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await applyTokens(data);
     },
     logout: () => {
-      clearTokens();
+      void serverLogout(); // revokes the session family + clears the cookie
       setAuthed(false);
       queryClient.clear();
     },

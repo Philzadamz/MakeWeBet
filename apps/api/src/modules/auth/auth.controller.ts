@@ -1,7 +1,8 @@
-import { Body, Controller, HttpCode, Post, Req, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, HttpCode, Post, Req, Res, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { ApiBearerAuth, ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { z } from 'zod';
 import {
   ForgotPasswordRequest,
@@ -11,51 +12,112 @@ import {
 } from '@fiq/contracts';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { AuthService } from './auth.service';
-import { TokenService } from './token.service';
+import { TokenService, type IssuedTokens } from './token.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import type { AuthenticatedUser } from './strategies/jwt.strategy';
 
-const RefreshRequest = z.object({ refreshToken: z.string().min(32) });
+const RefreshRequest = z.object({ refreshToken: z.string().min(32).optional() });
 const VerifyEmailRequest = z.object({ code: z.string().regex(/^[0-9]{6}$/) });
 const ResetPasswordBody = ResetPasswordRequest.extend({ userId: z.string().uuid() });
 
+export const REFRESH_COOKIE = 'fiq_rt';
+
+/**
+ * Token delivery strategy:
+ *   - Web: refresh token travels ONLY in an httpOnly SameSite=Strict cookie,
+ *     path-scoped to the auth routes — it never touches JS-readable storage.
+ *   - Mobile (Flutter): send `X-Client: mobile` to receive the refresh token
+ *     in the response body for secure native storage.
+ */
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
+  private readonly cookiePath: string;
+  private readonly cookieMaxAgeMs: number;
+  private readonly secureCookies: boolean;
+
   constructor(
     private readonly auth: AuthService,
     private readonly tokens: TokenService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.cookiePath = `/${config.getOrThrow<string>('API_GLOBAL_PREFIX')}/v1/auth`;
+    this.cookieMaxAgeMs = config.getOrThrow<number>('JWT_REFRESH_TTL_SEC') * 1000;
+    this.secureCookies = config.get('NODE_ENV') === 'production';
+  }
+
+  private deliver(res: Response, req: Request, tokens: IssuedTokens) {
+    res.cookie(REFRESH_COOKIE, tokens.refreshToken, {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: this.secureCookies,
+      path: this.cookiePath,
+      maxAge: this.cookieMaxAgeMs,
+    });
+    const isMobile = req.headers['x-client'] === 'mobile';
+    return {
+      accessToken: tokens.accessToken,
+      expiresIn: tokens.expiresIn,
+      ...(isMobile ? { refreshToken: tokens.refreshToken } : {}),
+    };
+  }
+
+  private refreshTokenFrom(req: Request, body: { refreshToken?: string }): string {
+    const token = body.refreshToken ?? (req.cookies?.[REFRESH_COOKIE] as string | undefined);
+    if (!token) throw new UnauthorizedException({ code: 'NO_REFRESH_TOKEN' });
+    return token;
+  }
 
   @Post('register')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @ApiHeader({ name: 'x-client', required: false, description: '"mobile" to receive refreshToken in body' })
   @ApiOperation({ summary: 'Create an account (wallet is created atomically)' })
-  register(@Body(new ZodValidationPipe(RegisterRequest)) dto: RegisterRequest) {
-    return this.auth.register(dto);
+  async register(
+    @Body(new ZodValidationPipe(RegisterRequest)) dto: RegisterRequest,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.deliver(res, req, await this.auth.register(dto));
   }
 
   @Post('login')
   @HttpCode(200)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
-  login(
+  async login(
     @Body(new ZodValidationPipe(LoginRequest)) dto: LoginRequest,
     @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ) {
-    return this.auth.login(dto, { ip: req.ip, userAgent: req.headers['user-agent'] });
+    const tokens = await this.auth.login(dto, {
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    return this.deliver(res, req, tokens);
   }
 
   @Post('refresh')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Rotate refresh token (reuse revokes the family)' })
-  refresh(@Body(new ZodValidationPipe(RefreshRequest)) dto: { refreshToken: string }) {
-    return this.tokens.rotate(dto.refreshToken);
+  @ApiOperation({ summary: 'Rotate refresh token — cookie (web) or body (mobile); reuse revokes the family' })
+  async refresh(
+    @Body(new ZodValidationPipe(RefreshRequest)) body: { refreshToken?: string },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const rotated = await this.tokens.rotate(this.refreshTokenFrom(req, body));
+    return this.deliver(res, req, rotated);
   }
 
   @Post('logout')
   @HttpCode(204)
-  async logout(@Body(new ZodValidationPipe(RefreshRequest)) dto: { refreshToken: string }) {
-    await this.tokens.revokeByToken(dto.refreshToken);
+  async logout(
+    @Body(new ZodValidationPipe(RefreshRequest)) body: { refreshToken?: string },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const token = body.refreshToken ?? (req.cookies?.[REFRESH_COOKIE] as string | undefined);
+    if (token) await this.tokens.revokeByToken(token);
+    res.clearCookie(REFRESH_COOKIE, { path: this.cookiePath });
   }
 
   @Post('verify-email')

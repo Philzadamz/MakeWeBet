@@ -1,26 +1,39 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createTransport, type Transporter } from 'nodemailer';
 
 /**
- * EmailPort placeholder adapter. In development it logs (Mailpit SMTP wiring
- * lands with the full NotificationsModule); the interface is what matters —
- * callers never know the transport. Swap for SES/Resend in production.
+ * Email adapter behind the notification abstraction. Transport comes from
+ * SMTP_URL — Mailpit (smtp://localhost:1025) in dev, SES/any SMTP relay in
+ * production. Without a configured URL it logs in dev and warns loudly in
+ * production; email failures never break the calling flow (OTPs can be
+ * re-requested; money paths must not depend on SMTP availability).
  */
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
-  private readonly isDev: boolean;
+  private readonly transport?: Transporter;
+  private readonly from: string;
 
   constructor(config: ConfigService) {
-    this.isDev = config.get('NODE_ENV') !== 'production';
+    const smtpUrl = config.get<string>('SMTP_URL');
+    if (smtpUrl) this.transport = createTransport(smtpUrl);
+    this.from = config.get<string>('EMAIL_FROM') ?? 'Football IQ <no-reply@fiq.local>';
+    if (!smtpUrl && config.get('NODE_ENV') === 'production') {
+      this.logger.error('SMTP_URL not configured — production emails will be dropped');
+    }
   }
 
   async send(to: string, subject: string, body: string): Promise<void> {
-    if (this.isDev) {
-      this.logger.log(`✉️  to=${to} subject="${subject}"\n${body}`);
+    if (!this.transport) {
+      this.logger.log(`✉️  (no transport) to=${to} subject="${subject}"\n${body}`);
       return;
     }
-    // TODO(production): SES/Resend adapter behind NotificationPort.
-    this.logger.warn(`email transport not configured; dropping mail to ${to}`);
+    try {
+      await this.transport.sendMail({ from: this.from, to, subject, text: body });
+      this.logger.log(`✉️  sent to=${to} subject="${subject}"`);
+    } catch (err) {
+      this.logger.error(`email to ${to} failed: ${String(err)}`);
+    }
   }
 }
