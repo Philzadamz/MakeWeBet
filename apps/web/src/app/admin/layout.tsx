@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { clsx } from 'clsx';
-import { BarChart3, CalendarCheck, ScrollText, ShieldAlert, Trophy, Users } from 'lucide-react';
+import { BarChart3, CalendarCheck, ScrollText, Settings, ShieldAlert, Trophy, Users } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { EmptyState, Spinner } from '@/components/ui';
 
@@ -15,6 +15,7 @@ const LINKS = [
   { href: '/admin/fixtures', label: 'Results', icon: CalendarCheck },
   { href: '/admin/withdrawals', label: 'Withdrawals', icon: ShieldAlert },
   { href: '/admin/users', label: 'Users', icon: Users },
+  { href: '/admin/settings', label: 'Settings', icon: Settings },
   { href: '/admin/audit', label: 'Audit', icon: ScrollText },
 ];
 
