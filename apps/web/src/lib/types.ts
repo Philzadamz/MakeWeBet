@@ -50,7 +50,7 @@ export interface ContestDetail extends ContestListItem {
 }
 
 export interface LeaderboardView {
-  contest: { slug: string; title: string; status: ContestStatus };
+  contest: { id: string; slug: string; title: string; status: ContestStatus };
   entries: {
     rank: number;
     username: string;

@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import { api } from '@/lib/api';
 import { ngn } from '@/lib/format';
+import { useContestLive } from '@/lib/live';
 import type { LeaderboardView } from '@/lib/types';
 import { Badge, Card, EmptyState, Spinner } from '@/components/ui';
 
@@ -15,9 +16,11 @@ export default function LeaderboardPage({ params }: { params: Promise<{ slug: st
   const { slug } = use(params);
   const { data, isLoading } = useQuery({
     queryKey: ['leaderboard', slug],
-    refetchInterval: 10_000, // live during scoring
+    refetchInterval: 30_000, // WebSocket pushes are primary; this is the fallback
     queryFn: async () => (await api.get<LeaderboardView>(`/contests/${slug}/leaderboard`)).data,
   });
+  // Instant updates whenever a match is scored or the contest settles.
+  useContestLive(data?.contest.id, slug);
 
   if (isLoading) return <Spinner />;
   if (!data) return <p className="py-16 text-center text-zinc-500">Leaderboard unavailable.</p>;

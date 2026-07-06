@@ -53,7 +53,7 @@ export class LeaderboardService {
         ).map((r) => entries.find((e) => e.id === r.entryId)!);
 
     const payload = {
-      contest: { slug, title: contest.title, status: contest.status },
+      contest: { id: contest.id, slug, title: contest.title, status: contest.status },
       entries: ordered.map((e, i) => ({
         rank: settled ? e.finalRank : i + 1,
         username: e.user.username,

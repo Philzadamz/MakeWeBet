@@ -37,6 +37,16 @@ export default function AdminContestsPage() {
     onError: (err) => setError(apiError(err)),
   });
 
+  const cancel = useMutation({
+    mutationFn: async ({ id, reason }: { id: string; reason: string }) =>
+      api.post(`/admin/contests/${id}/cancel`, { reason }),
+    onSuccess: () => {
+      setError(null);
+      void queryClient.invalidateQueries({ queryKey: ['admin-contests'] });
+    },
+    onError: (err) => setError(apiError(err)),
+  });
+
   if (isLoading) return <Spinner />;
 
   return (
@@ -84,6 +94,20 @@ export default function AdminContestsPage() {
                     disabled={act.isPending}
                   >
                     Force lock
+                  </Button>
+                )}
+                {['DRAFT', 'PUBLISHED', 'LOCKED'].includes(c.status) && (
+                  <Button
+                    variant="secondary"
+                    disabled={cancel.isPending}
+                    onClick={() => {
+                      const reason = window.prompt(
+                        `Cancel "${c.title}"? All ${c.entryCount} entries will be refunded. Reason:`,
+                      );
+                      if (reason && reason.length >= 3) cancel.mutate({ id: c.id, reason });
+                    }}
+                  >
+                    Cancel & refund
                   </Button>
                 )}
               </div>

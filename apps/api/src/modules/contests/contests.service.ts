@@ -9,6 +9,7 @@ import { EventTopics, type CreateContestRequest } from '@fiq/contracts';
 import type { Contest } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { OutboxService } from '../../infrastructure/outbox/outbox.service';
+import { LedgerService } from '../wallet/ledger/ledger.service';
 import { validateSlotConfiguration } from '../predictions/slip-validator';
 import { ContestQueue } from './contest.queue';
 
@@ -22,6 +23,7 @@ export class ContestsService {
     private readonly prisma: PrismaService,
     private readonly outbox: OutboxService,
     private readonly queue: ContestQueue,
+    private readonly ledger: LedgerService,
   ) {}
 
   // ---------------------------------------------------------------- admin
@@ -161,6 +163,82 @@ export class ContestsService {
         this.logger.log(`contest ${contestId} locked`);
       }
     });
+  }
+
+  /**
+   * Cancel a contest and refund every active entry. One transaction:
+   * per-entry ENTRY_REFUND journals (escrow → user), entries REFUNDED,
+   * contest CANCELLED — and the escrow must be exactly zero afterwards.
+   * Allowed pre-scoring only; scored money moves only through settlement.
+   */
+  async cancel(contestId: string, reason: string): Promise<void> {
+    const contest = await this.prisma.contest.findUnique({
+      where: { id: contestId, deletedAt: null },
+      include: { entries: { where: { status: 'ACTIVE' } }, escrowAccount: true },
+    });
+    if (!contest) throw new NotFoundException({ code: 'CONTEST_NOT_FOUND' });
+    if (!['DRAFT', 'PUBLISHED', 'LOCKED'].includes(contest.status)) {
+      throw new ConflictException({
+        code: 'INVALID_STATUS',
+        message: `Cannot cancel from ${contest.status} — scoring has begun`,
+      });
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const entry of contest.entries) {
+        const userAccount = await tx.ledgerAccount.findUniqueOrThrow({
+          where: {
+            userId_type_currency: {
+              userId: entry.userId,
+              type: 'USER_AVAILABLE',
+              currency: contest.currency,
+            },
+          },
+        });
+        await this.ledger.post(
+          {
+            type: 'ENTRY_REFUND',
+            idempotencyKey: `refund:${entry.id}`,
+            description: `Refund — ${contest.title} cancelled`,
+            lines: [
+              { accountId: contest.escrowAccount!.id, amountMinor: -contest.entryFeeMinor },
+              { accountId: userAccount.id, amountMinor: contest.entryFeeMinor },
+            ],
+            metadata: { contestId, entryId: entry.id, reason },
+          },
+          tx,
+        );
+        await tx.entry.update({ where: { id: entry.id }, data: { status: 'REFUNDED' } });
+        await tx.notification.create({
+          data: {
+            userId: entry.userId,
+            type: 'contest.cancelled',
+            title: 'Contest cancelled — entry refunded',
+            body: `"${contest.title}" was cancelled (${reason}). Your entry fee is back in your wallet.`,
+            data: { contestId },
+          },
+        });
+      }
+
+      if (contest.escrowAccount) {
+        const escrowAfter = await tx.ledgerAccount.findUniqueOrThrow({
+          where: { id: contest.escrowAccount.id },
+          select: { balanceMinor: true },
+        });
+        if (escrowAfter.balanceMinor !== 0n) {
+          throw new Error(
+            `cancel invariant violated: escrow ${contestId} = ${escrowAfter.balanceMinor}`,
+          );
+        }
+      }
+
+      await tx.contest.update({
+        where: { id: contestId },
+        data: { status: 'CANCELLED', cancelledAt: new Date() },
+      });
+      await this.outbox.emit(tx, EventTopics.ContestCancelled, { contestId, reason });
+    });
+    this.logger.log(`contest ${contestId} cancelled: ${contest.entries.length} entries refunded`);
   }
 
   async listAll() {

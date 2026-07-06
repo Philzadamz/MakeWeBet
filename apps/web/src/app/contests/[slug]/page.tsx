@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Clock, Trophy, Users } from 'lucide-react';
 import { api } from '@/lib/api';
 import { ngn, timeUntil } from '@/lib/format';
+import { useContestLive } from '@/lib/live';
 import type { ContestDetail } from '@/lib/types';
 import { Badge, Card, Spinner } from '@/components/ui';
 import { PredictionBuilder } from '@/components/prediction-builder';
@@ -16,6 +17,9 @@ export default function ContestDetailPage({ params }: { params: Promise<{ slug: 
     queryKey: ['contest', slug],
     queryFn: async () => (await api.get<ContestDetail>(`/contests/${slug}`)).data,
   });
+
+  // Live prize-pool ticker + status flips while the page is open.
+  useContestLive(contest?.id, slug);
 
   if (isLoading) return <Spinner />;
   if (!contest) return <p className="py-16 text-center text-zinc-500">Contest not found.</p>;

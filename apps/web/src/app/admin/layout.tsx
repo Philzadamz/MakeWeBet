@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { clsx } from 'clsx';
-import { BarChart3, CalendarCheck, ShieldAlert, Trophy } from 'lucide-react';
+import { BarChart3, CalendarCheck, ScrollText, ShieldAlert, Trophy, Users } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { EmptyState, Spinner } from '@/components/ui';
 
@@ -14,6 +14,8 @@ const LINKS = [
   { href: '/admin/contests', label: 'Contests', icon: Trophy },
   { href: '/admin/fixtures', label: 'Results', icon: CalendarCheck },
   { href: '/admin/withdrawals', label: 'Withdrawals', icon: ShieldAlert },
+  { href: '/admin/users', label: 'Users', icon: Users },
+  { href: '/admin/audit', label: 'Audit', icon: ScrollText },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {

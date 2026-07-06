@@ -5,10 +5,12 @@ import type Redis from 'ioredis';
 import { EventTopics, type DomainEventEnvelope } from '@fiq/contracts';
 import { REDIS } from '../../infrastructure/redis/redis.module';
 import { DOMAIN_EVENTS_QUEUE } from '../../infrastructure/outbox/outbox.relay';
+import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { ScoringService } from '../scoring/scoring.service';
 import { SettlementService } from '../settlement/settlement.service';
 import { StatsService } from '../stats/stats.service';
 import { WithdrawalsService } from '../withdrawals/withdrawals.service';
+import { LivePublisher } from '../live/live-publisher.service';
 
 /**
  * Routes outbox-relayed domain events to their handlers. Delivery is
@@ -27,6 +29,8 @@ export class DomainEventsWorker implements OnModuleInit, OnModuleDestroy {
     private readonly settlement: SettlementService,
     private readonly stats: StatsService,
     private readonly withdrawals: WithdrawalsService,
+    private readonly prisma: PrismaService,
+    private readonly live: LivePublisher,
   ) {}
 
   onModuleInit(): void {
@@ -48,9 +52,21 @@ export class DomainEventsWorker implements OnModuleInit, OnModuleDestroy {
         break;
       case EventTopics.ContestScored:
         await this.settlement.distribute(envelope.payload.contestId!);
+        await this.pushLive(envelope.payload.contestId!, 'leaderboard:update');
+        break;
+      case EventTopics.PredictionScored:
+        await this.pushLive(envelope.payload.contestId!, 'leaderboard:update');
         break;
       case EventTopics.PrizesDistributed:
         await this.stats.recomputeForContest(envelope.payload.contestId!);
+        await this.pushLive(envelope.payload.contestId!, 'leaderboard:update');
+        break;
+      case EventTopics.EntryPaid:
+        await this.pushLive(envelope.payload.contestId!, 'pool:update');
+        break;
+      case EventTopics.ContestLocked:
+      case EventTopics.ContestCancelled:
+        await this.pushLive(envelope.payload.contestId!, 'contest:status');
         break;
       case EventTopics.PaymentWebhookReceived: {
         const { event, reference } = envelope.payload;
@@ -65,6 +81,37 @@ export class DomainEventsWorker implements OnModuleInit, OnModuleDestroy {
         // Unhandled topics are fine — stats/notification projections attach here later.
         this.logger.debug(`no handler for ${envelope.topic}`);
     }
+  }
+
+  /** Bust the leaderboard cache and push a live tick for a contest. */
+  private async pushLive(
+    contestId: string,
+    type: 'leaderboard:update' | 'pool:update' | 'contest:status',
+  ): Promise<void> {
+    const contest = await this.prisma.contest.findUnique({
+      where: { id: contestId },
+      select: {
+        slug: true,
+        status: true,
+        entryFeeMinor: true,
+        commissionBps: true,
+        _count: { select: { entries: { where: { status: 'ACTIVE' } } } },
+      },
+    });
+    if (!contest) return;
+    await this.redis.del(`lb:${contest.slug}`);
+    const gross = contest.entryFeeMinor * BigInt(contest._count.entries);
+    const pool = (gross * (10_000n - BigInt(contest.commissionBps))) / 10_000n;
+    await this.live.publish({
+      type,
+      contestId,
+      slug: contest.slug,
+      payload: {
+        status: contest.status,
+        entryCount: contest._count.entries,
+        estimatedPrizePoolMinor: pool.toString(),
+      },
+    });
   }
 
   async onModuleDestroy(): Promise<void> {

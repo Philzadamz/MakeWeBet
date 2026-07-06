@@ -1,6 +1,10 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { z } from 'zod';
 import { CreateContestRequest } from '@fiq/contracts';
+import { AuditService } from '../audit/audit.service';
+
+const CancelBody = z.object({ reason: z.string().min(3).max(500) });
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -15,7 +19,10 @@ import { ContestsService } from './contests.service';
 @Roles('CONTEST_ADMIN')
 @Controller('admin/contests')
 export class ContestsAdminController {
-  constructor(private readonly contests: ContestsService) {}
+  constructor(
+    private readonly contests: ContestsService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'All contests, any status, newest first' })
@@ -43,5 +50,24 @@ export class ContestsAdminController {
   async lock(@Param('id', ParseUUIDPipe) id: string) {
     await this.contests.lock(id);
     return { locked: true };
+  }
+
+  @Post(':id/cancel')
+  @ApiOperation({ summary: 'Cancel pre-scoring and refund every entry (audited)' })
+  async cancel(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(CancelBody)) dto: { reason: string },
+  ) {
+    await this.contests.cancel(id, dto.reason);
+    await this.audit.record({
+      actorId: admin.userId,
+      actorType: 'ADMIN',
+      action: 'contest.cancel',
+      entityType: 'Contest',
+      entityId: id,
+      after: { reason: dto.reason },
+    });
+    return { cancelled: true };
   }
 }

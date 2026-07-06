@@ -27,6 +27,7 @@ import { WithdrawalsModule } from './modules/withdrawals/withdrawals.module';
 import { StatsModule } from './modules/stats/stats.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { DifficultyModule } from './modules/difficulty/difficulty.module';
+import { LiveModule } from './modules/live/live.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { DifficultyModule } from './modules/difficulty/difficulty.module';
     PaymentsModule,
     SportsModule,
     DifficultyModule,
+    LiveModule,
     CryptoModule,
     AuditModule,
     SettlementModule,

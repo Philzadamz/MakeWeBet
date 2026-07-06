@@ -101,6 +101,9 @@ export class ScoringService {
         });
       }
 
+      // Lets live leaderboards tick mid-scoring, one event per match scored.
+      await this.outbox.emit(tx, EventTopics.PredictionScored, { contestId });
+
       this.logger.log(
         `scored ${predictions.length} predictions for contest ${contestId} match ${contestMatchId}`,
       );
