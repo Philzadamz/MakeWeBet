@@ -1,0 +1,776 @@
+// ============================================================================
+// Football IQ Challenge — Database Schema
+//
+// Conventions:
+//   - All money is integer minor units (kobo), suffixed `Minor`.
+//   - All contest points are integers scaled x10, suffixed `X10`
+//     (Expert = 32.5 pts = 325). Max slip score = 1500 (150.0 pts).
+//   - Soft deletes via `deletedAt` on user-facing aggregates.
+//   - Ledger tables are append-only: no updates, no deletes, ever.
+//   - Enum values mirror @fiq/contracts exactly (drift-tested).
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================== IDENTITY ====================================
+
+enum UserRole {
+  USER
+  SUPPORT
+  CONTEST_ADMIN
+  FINANCE_ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  /// Stored lowercase; normalized at the application boundary.
+  email        String     @unique
+  username     String     @unique
+  phone        String?    @unique
+  passwordHash String
+  firstName    String?
+  lastName     String?
+  avatarUrl    String?
+  role         UserRole   @default(USER)
+  status       UserStatus @default(PENDING_VERIFICATION)
+
+  emailVerifiedAt DateTime?
+  lastLoginAt     DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  sessions       Session[]
+  devices        Device[]
+  otpCodes       OtpCode[]
+  ledgerAccounts LedgerAccount[]
+  entries        Entry[]
+  withdrawals    Withdrawal[]    @relation("withdrawal_user")
+  bankAccounts   BankAccount[]
+  notifications  Notification[]
+  paymentIntents PaymentIntent[]
+  stats          UserStats?
+
+  @@index([status, createdAt])
+  @@map("users")
+}
+
+model Device {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  fingerprint String
+  name        String?
+  platform    String? // web | ios | android
+  lastSeenAt  DateTime @default(now())
+  trustedAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  user     User      @relation(fields: [userId], references: [id])
+  sessions Session[]
+
+  @@unique([userId, fingerprint])
+  @@index([fingerprint]) // fraud: device shared across accounts
+  @@map("devices")
+}
+
+/// Refresh-token session with family-based reuse detection:
+/// rotating a token creates a child in the same family; presenting a
+/// consumed token revokes the entire family.
+model Session {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @db.Uuid
+  deviceId         String?   @db.Uuid
+  familyId         String    @db.Uuid
+  refreshTokenHash String    @unique
+  ip               String?
+  userAgent        String?
+  expiresAt        DateTime
+  consumedAt       DateTime?
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  user   User    @relation(fields: [userId], references: [id])
+  device Device? @relation(fields: [deviceId], references: [id])
+
+  @@index([userId, familyId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+enum OtpPurpose {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+  WITHDRAWAL
+  LOGIN
+}
+
+model OtpCode {
+  id         String     @id @default(uuid()) @db.Uuid
+  userId     String     @db.Uuid
+  purpose    OtpPurpose
+  codeHash   String
+  attempts   Int        @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, purpose, expiresAt])
+  @@map("otp_codes")
+}
+
+// ============================== FINANCE =====================================
+// Double-entry ledger. Balances are DERIVED; `balanceMinor` on the account is
+// a materialized cache updated in the same transaction as its journal lines
+// and cross-checked by reconciliation jobs.
+
+enum LedgerAccountType {
+  USER_AVAILABLE
+  USER_WITHDRAWAL_PENDING
+  CONTEST_ESCROW
+  PLATFORM_REVENUE
+  GATEWAY_CLEARING
+  EXTERNAL // counterpart for money entering/leaving the system
+}
+
+model LedgerAccount {
+  id           String            @id @default(uuid()) @db.Uuid
+  type         LedgerAccountType
+  /// Owning user for USER_* accounts, contest for CONTEST_ESCROW, null for system accounts.
+  userId       String?           @db.Uuid
+  contestId    String?           @unique @db.Uuid
+  currency     String            @default("NGN")
+  balanceMinor BigInt            @default(0)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  user    User?    @relation(fields: [userId], references: [id])
+  contest Contest? @relation(fields: [contestId], references: [id])
+  lines   JournalLine[]
+
+  @@unique([userId, type, currency])
+  @@index([type])
+  @@map("ledger_accounts")
+}
+
+enum JournalType {
+  DEPOSIT
+  ENTRY_FEE
+  ENTRY_REFUND
+  PRIZE_PAYOUT
+  COMMISSION
+  WITHDRAWAL_HOLD
+  WITHDRAWAL_SETTLE
+  WITHDRAWAL_REVERSAL
+  ADJUSTMENT
+}
+
+/// Append-only. One business money movement = one journal entry whose lines
+/// MUST sum to zero (enforced in LedgerService and by a deferred DB trigger
+/// added in raw migration 0002_ledger_guards).
+model JournalEntry {
+  id             String      @id @default(uuid()) @db.Uuid
+  type           JournalType
+  /// Client/system idempotency key — the ledger's replay shield.
+  idempotencyKey String      @unique
+  description    String
+  metadata       Json?
+  createdAt      DateTime    @default(now())
+
+  lines JournalLine[]
+
+  @@index([type, createdAt])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  id          String @id @default(uuid()) @db.Uuid
+  entryId     String @db.Uuid
+  accountId   String @db.Uuid
+  /// Signed amount in minor units: positive = credit, negative = debit.
+  amountMinor BigInt
+  createdAt   DateTime @default(now())
+
+  entry   JournalEntry  @relation(fields: [entryId], references: [id])
+  account LedgerAccount @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, createdAt(sort: Desc)])
+  @@map("journal_lines")
+}
+
+enum PaymentProvider {
+  PAYSTACK
+  FLUTTERWAVE
+  MONNIFY
+}
+
+enum PaymentStatus {
+  INITIATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  ABANDONED
+}
+
+model PaymentIntent {
+  id          String          @id @default(uuid()) @db.Uuid
+  userId      String          @db.Uuid
+  provider    PaymentProvider
+  providerRef String
+  amountMinor BigInt
+  currency    String          @default("NGN")
+  status      PaymentStatus   @default(INITIATED)
+  channel     String? // card, bank_transfer, ussd...
+  failReason  String?
+  settledAt   DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([provider, providerRef])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@map("payment_intents")
+}
+
+/// Raw inbound webhook log — processed exactly once via the unique key.
+model WebhookEvent {
+  id          String          @id @default(uuid()) @db.Uuid
+  provider    PaymentProvider
+  providerRef String // provider's event id
+  signature   String?
+  payload     Json
+  receivedAt  DateTime        @default(now())
+  processedAt DateTime?
+  error       String?
+
+  @@unique([provider, providerRef])
+  @@index([processedAt])
+  @@map("webhook_events")
+}
+
+enum WithdrawalStatus {
+  REQUESTED
+  UNDER_REVIEW
+  APPROVED
+  PROCESSING
+  PAID
+  FAILED
+  REJECTED
+  REVERSED
+}
+
+model BankAccount {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  bankCode      String
+  bankName      String
+  /// AES-256-GCM encrypted at the application layer.
+  accountNumberEnc String
+  accountName   String
+  verifiedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  deletedAt     DateTime?
+
+  user        User         @relation(fields: [userId], references: [id])
+  withdrawals Withdrawal[]
+
+  @@index([userId])
+  @@map("bank_accounts")
+}
+
+model Withdrawal {
+  id            String           @id @default(uuid()) @db.Uuid
+  userId        String           @db.Uuid
+  bankAccountId String           @db.Uuid
+  amountMinor   BigInt
+  feeMinor      BigInt           @default(0)
+  status        WithdrawalStatus @default(REQUESTED)
+  fraudScore    Int? // 0..100, from fraud engine
+  reviewedById  String?          @db.Uuid
+  reviewNote    String?
+  provider      PaymentProvider?
+  providerRef   String?
+  failReason    String?
+  requestedAt   DateTime         @default(now())
+  resolvedAt    DateTime?
+  updatedAt     DateTime         @updatedAt
+
+  user        User        @relation("withdrawal_user", fields: [userId], references: [id])
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id])
+
+  @@index([status, requestedAt])
+  @@index([userId, requestedAt])
+  @@map("withdrawals")
+}
+
+// ============================== SPORTS DATA =================================
+// Anti-corruption layer: internal IDs everywhere; provider IDs live only in
+// *_provider_refs mapping tables so providers are swappable.
+
+enum SportsProvider {
+  API_FOOTBALL
+  SPORTMONKS
+  FOOTBALL_DATA
+}
+
+enum FixtureStatus {
+  SCHEDULED
+  LIVE
+  FINISHED
+  POSTPONED
+  CANCELLED
+}
+
+model League {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  country   String
+  logoUrl   String?
+  season    String?
+  createdAt DateTime @default(now())
+
+  fixtures     Fixture[]
+  providerRefs LeagueProviderRef[]
+
+  @@map("leagues")
+}
+
+model LeagueProviderRef {
+  leagueId    String         @db.Uuid
+  provider    SportsProvider
+  providerRef String
+
+  league League @relation(fields: [leagueId], references: [id])
+
+  @@id([provider, providerRef])
+  @@unique([leagueId, provider])
+  @@map("league_provider_refs")
+}
+
+model Team {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  shortName String?
+  logoUrl   String?
+  createdAt DateTime @default(now())
+
+  homeFixtures Fixture[]         @relation("home_team")
+  awayFixtures Fixture[]         @relation("away_team")
+  providerRefs TeamProviderRef[]
+
+  @@map("teams")
+}
+
+model TeamProviderRef {
+  teamId      String         @db.Uuid
+  provider    SportsProvider
+  providerRef String
+
+  team Team @relation(fields: [teamId], references: [id])
+
+  @@id([provider, providerRef])
+  @@unique([teamId, provider])
+  @@map("team_provider_refs")
+}
+
+model Fixture {
+  id         String        @id @default(uuid()) @db.Uuid
+  leagueId   String        @db.Uuid
+  homeTeamId String        @db.Uuid
+  awayTeamId String        @db.Uuid
+  kickoffAt  DateTime
+  status     FixtureStatus @default(SCHEDULED)
+
+  homeGoals   Int?
+  awayGoals   Int?
+  htHomeGoals Int?
+  htAwayGoals Int?
+  /// HOME | AWAY | NONE — needed by First Team To Score market.
+  firstToScore String?
+
+  /// Set only when the result is verified final; scoring keys off this.
+  resultFinalizedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  league       League               @relation(fields: [leagueId], references: [id])
+  homeTeam     Team                 @relation("home_team", fields: [homeTeamId], references: [id])
+  awayTeam     Team                 @relation("away_team", fields: [awayTeamId], references: [id])
+  providerRefs FixtureProviderRef[]
+  difficulty   FixtureDifficulty?
+  contestMatches ContestMatch[]
+
+  @@index([kickoffAt, status])
+  @@map("fixtures")
+}
+
+model FixtureProviderRef {
+  fixtureId   String         @db.Uuid
+  provider    SportsProvider
+  providerRef String
+
+  fixture Fixture @relation(fields: [fixtureId], references: [id])
+
+  @@id([provider, providerRef])
+  @@unique([fixtureId, provider])
+  @@map("fixture_provider_refs")
+}
+
+/// Output of the Difficulty Heatmap engine (1..5 stars) plus optional
+/// audited admin override. `signals` stores each weighted input for
+/// explainability in the admin panel.
+model FixtureDifficulty {
+  fixtureId      String   @id @db.Uuid
+  stars          Int // 1..5 computed
+  overrideStars  Int? // admin override, wins when present
+  overrideById   String?  @db.Uuid
+  signals        Json // { form: 0.4, homeAdvantage: 0.2, ... }
+  weightSetId    String   @db.Uuid
+  computedAt     DateTime @default(now())
+
+  fixture   Fixture             @relation(fields: [fixtureId], references: [id])
+  weightSet DifficultyWeightSet @relation(fields: [weightSetId], references: [id])
+
+  @@map("fixture_difficulties")
+}
+
+model DifficultyWeightSet {
+  id        String   @id @default(uuid()) @db.Uuid
+  version   Int      @unique @default(autoincrement())
+  name      String
+  /// { form, homeAdvantage, leaguePosition, goalDifference, headToHead,
+  ///   recentGoals, defensiveRecord, injuries, suspensions, historical }
+  weights   Json
+  isActive  Boolean  @default(false)
+  createdById String? @db.Uuid
+  createdAt DateTime @default(now())
+
+  difficulties FixtureDifficulty[]
+
+  @@map("difficulty_weight_sets")
+}
+
+// ============================== CONTEST =====================================
+
+enum ContestStatus {
+  DRAFT
+  PUBLISHED
+  LOCKED
+  SCORING
+  SCORED
+  SETTLED
+  ARCHIVED
+  CANCELLED
+}
+
+enum DifficultyTier {
+  EASY
+  MEDIUM
+  HARD
+  EXPERT
+}
+
+enum MarketType {
+  MATCH_WINNER
+  DOUBLE_CHANCE
+  OVER_UNDER_25
+  BTTS
+  FIRST_HALF_WINNER
+  FIRST_TEAM_TO_SCORE
+  WINNING_MARGIN
+  CLEAN_SHEET
+  EXACT_GOALS
+  CORRECT_SCORE
+}
+
+/// Versioned scoring configuration. Contests snapshot a rule set at publish;
+/// admin edits create new versions and NEVER mutate published ones.
+model RuleSet {
+  id        String   @id @default(uuid()) @db.Uuid
+  version   Int      @unique @default(autoincrement())
+  name      String
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  marketRules MarketRule[]
+  contests    Contest[]
+
+  @@map("rule_sets")
+}
+
+model MarketRule {
+  id         String         @id @default(uuid()) @db.Uuid
+  ruleSetId  String         @db.Uuid
+  marketType MarketType
+  tier       DifficultyTier
+  pointsX10  Int // Expert = 325 (32.5 points)
+
+  ruleSet RuleSet @relation(fields: [ruleSetId], references: [id])
+
+  @@unique([ruleSetId, marketType])
+  @@map("market_rules")
+}
+
+/// Payout structure template, e.g. [{from:1,to:1,shareBps:5000}, ...].
+/// Shares are basis points of the prize pool and must sum to 10000.
+model PayoutTemplate {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  structure Json
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  contests Contest[]
+
+  @@map("payout_templates")
+}
+
+model Contest {
+  id               String        @id @default(uuid()) @db.Uuid
+  slug             String        @unique
+  title            String
+  description      String?
+  status           ContestStatus @default(DRAFT)
+  entryFeeMinor    BigInt
+  currency         String        @default("NGN")
+  commissionBps    Int           @default(1500) // 15%
+  maxEntries       Int?
+  /// Earliest kickoff among contest fixtures; recomputed on fixture changes
+  /// while in DRAFT/PUBLISHED. Hard gate for all prediction writes.
+  lockAt           DateTime?
+  publishedAt      DateTime?
+  lockedAt         DateTime?
+  scoredAt         DateTime?
+  settledAt        DateTime?
+  cancelledAt      DateTime?
+  ruleSetId        String        @db.Uuid
+  payoutTemplateId String        @db.Uuid
+  createdById      String        @db.Uuid
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  ruleSet        RuleSet        @relation(fields: [ruleSetId], references: [id])
+  payoutTemplate PayoutTemplate @relation(fields: [payoutTemplateId], references: [id])
+  matches        ContestMatch[]
+  slots          ContestSlot[]
+  entries        Entry[]
+  escrowAccount  LedgerAccount?
+
+  @@index([status, lockAt])
+  @@map("contests")
+}
+
+model ContestMatch {
+  id        String @id @default(uuid()) @db.Uuid
+  contestId String @db.Uuid
+  fixtureId String @db.Uuid
+  order     Int
+
+  contest Contest       @relation(fields: [contestId], references: [id])
+  fixture Fixture       @relation(fields: [fixtureId], references: [id])
+  slots   ContestSlot[]
+
+  @@unique([contestId, fixtureId])
+  @@unique([contestId, order])
+  @@map("contest_matches")
+}
+
+/// The 10 prediction slots of the Balanced Challenge (2E/3M/3H/2X).
+/// Each slot pins a match + tier; the USER chooses which market within the
+/// tier (and the selection). That choice is what the Risk Meter measures.
+model ContestSlot {
+  id             String         @id @default(uuid()) @db.Uuid
+  contestId      String         @db.Uuid
+  contestMatchId String         @db.Uuid
+  slotNo         Int // 1..10
+  tier           DifficultyTier
+
+  contest      Contest      @relation(fields: [contestId], references: [id])
+  contestMatch ContestMatch @relation(fields: [contestMatchId], references: [id])
+  predictions  Prediction[]
+
+  @@unique([contestId, slotNo])
+  @@map("contest_slots")
+}
+
+enum EntryStatus {
+  ACTIVE
+  REFUNDED
+  SETTLED
+}
+
+enum RiskProfile {
+  SAFE
+  BALANCED
+  AGGRESSIVE
+}
+
+model Entry {
+  id             String      @id @default(uuid()) @db.Uuid
+  contestId      String      @db.Uuid
+  userId         String      @db.Uuid
+  status         EntryStatus @default(ACTIVE)
+  /// Journal entry that charged the fee — the money audit trail.
+  feeJournalId   String      @db.Uuid
+  submittedAt    DateTime    @default(now()) // tie-breaker #4 (server clock)
+  totalPointsX10 Int         @default(0)
+  correctCount   Int         @default(0)
+  correctExpert  Int         @default(0) // tie-breaker #2
+  correctHard    Int         @default(0) // tie-breaker #3
+  finalRank      Int?
+  prizeMinor     BigInt      @default(0)
+  riskProfile    RiskProfile?
+  riskPct        Int?
+
+  contest     Contest      @relation(fields: [contestId], references: [id])
+  user        User         @relation(fields: [userId], references: [id])
+  predictions Prediction[]
+
+  @@unique([contestId, userId]) // one entry per user per contest
+  @@index([contestId, totalPointsX10(sort: Desc)])
+  @@index([userId, submittedAt])
+  @@map("entries")
+}
+
+model Prediction {
+  id             String     @id @default(uuid()) @db.Uuid
+  entryId        String     @db.Uuid
+  slotId         String     @db.Uuid
+  marketType     MarketType
+  selection      String
+  isCorrect      Boolean?
+  pointsX10      Int        @default(0)
+  scoredAt       DateTime?
+  createdAt      DateTime   @default(now())
+
+  entry Entry       @relation(fields: [entryId], references: [id])
+  slot  ContestSlot @relation(fields: [slotId], references: [id])
+
+  @@unique([entryId, slotId]) // one prediction per slot
+  @@index([slotId, scoredAt])
+  @@map("predictions")
+}
+
+// ============================== PLATFORM ====================================
+
+/// Dynamic settings: commission default, OTP TTLs, feature flags, risk
+/// thresholds. Scoring/difficulty configs have their own versioned tables.
+model Setting {
+  key         String   @id
+  value       Json
+  updatedById String?  @db.Uuid
+  updatedAt   DateTime @updatedAt
+
+  @@map("settings")
+}
+
+/// Append-only, hash-chained (each row's hash covers prevHash) for tamper
+/// evidence over admin and financial actions.
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  actorId    String?  @db.Uuid
+  actorType  String // USER | ADMIN | SYSTEM
+  action     String // e.g. contest.publish, withdrawal.approve
+  entityType String
+  entityId   String
+  before     Json?
+  after      Json?
+  ip         String?
+  prevHash   String?
+  hash       String
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
+
+/// Transactional outbox: written in the same tx as the state change,
+/// relayed to BullMQ by the outbox relay worker.
+model OutboxEvent {
+  id          String    @id @default(uuid()) @db.Uuid
+  topic       String
+  payload     Json
+  createdAt   DateTime  @default(now())
+  publishedAt DateTime?
+  attempts    Int       @default(0)
+  lastError   String?
+
+  @@index([publishedAt, createdAt]) // relay scans unpublished in order
+  @@map("outbox_events")
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  SMS
+  PUSH
+}
+
+model Notification {
+  id        String              @id @default(uuid()) @db.Uuid
+  userId    String              @db.Uuid
+  channel   NotificationChannel @default(IN_APP)
+  type      String // contest.reminder, prize.won, withdrawal.paid...
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?
+  sentAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+// ============================== STATS / IQ ==================================
+
+/// Projection rebuilt from prediction.scored + prizes.distributed events.
+model UserStats {
+  userId            String   @id @db.Uuid
+  contestsPlayed    Int      @default(0)
+  contestsWon       Int      @default(0)
+  predictionsTotal  Int      @default(0)
+  predictionsCorrect Int     @default(0)
+  totalPointsX10    BigInt   @default(0)
+  highestScoreX10   Int      @default(0)
+  totalWinningsMinor BigInt  @default(0)
+  currentStreak     Int      @default(0)
+  bestStreak        Int      @default(0)
+  /// { [marketType]: { total, correct } } — accuracy by market.
+  marketBreakdown   Json     @default("{}")
+  /// { [leagueId]: { total, correct } } — accuracy by league.
+  leagueBreakdown   Json     @default("{}")
+  /// { "2026-07": { pointsX10, contests, winningsMinor } }
+  monthlyBreakdown  Json     @default("{}")
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("user_stats")
+}
