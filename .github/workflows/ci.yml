@@ -68,13 +68,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Registry paths must be lowercase; github.repository preserves case.
+      - name: Compute lowercase image name
+        id: image
+        run: echo "repo=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/fiq-${{ matrix.name }}:latest
-            ghcr.io/${{ github.repository }}/fiq-${{ matrix.name }}:${{ github.sha }}
+            ghcr.io/${{ steps.image.outputs.repo }}/fiq-${{ matrix.name }}:latest
+            ghcr.io/${{ steps.image.outputs.repo }}/fiq-${{ matrix.name }}:${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
