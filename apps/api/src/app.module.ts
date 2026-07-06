@@ -26,6 +26,7 @@ import { AuditModule } from './modules/audit/audit.module';
 import { WithdrawalsModule } from './modules/withdrawals/withdrawals.module';
 import { StatsModule } from './modules/stats/stats.module';
 import { AdminModule } from './modules/admin/admin.module';
+import { DifficultyModule } from './modules/difficulty/difficulty.module';
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { AdminModule } from './modules/admin/admin.module';
     ContestsModule,
     PaymentsModule,
     SportsModule,
+    DifficultyModule,
     CryptoModule,
     AuditModule,
     SettlementModule,
