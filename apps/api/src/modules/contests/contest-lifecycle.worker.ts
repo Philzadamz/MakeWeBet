@@ -23,6 +23,9 @@ export class ContestLifecycleWorker implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
     if (!this.config.get<boolean>('RUN_WORKERS')) return;
+    // Dedicated connection — a Worker's blocking read for new jobs must not
+    // share a connection with anything that also issues regular commands
+    // (see DomainEventsWorker for the full explanation).
     this.worker = new Worker(
       CONTEST_LIFECYCLE_QUEUE,
       async (job) => {
@@ -30,7 +33,7 @@ export class ContestLifecycleWorker implements OnModuleInit, OnModuleDestroy {
           await this.contests.lock((job.data as { contestId: string }).contestId);
         }
       },
-      { connection: this.redis },
+      { connection: this.redis.duplicate() },
     );
     this.worker.on('failed', (job, err) =>
       this.logger.error(`job ${job?.name}:${job?.id} failed: ${err.message}`),

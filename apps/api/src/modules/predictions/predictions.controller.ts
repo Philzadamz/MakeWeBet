@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { SubmitSlipRequest } from '@fiq/contracts';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { throttleLimit } from '../../common/throttle-limit';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
@@ -16,7 +17,7 @@ export class PredictionsController {
   constructor(private readonly entries: EntriesService) {}
 
   @Post()
-  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Throttle({ default: { limit: throttleLimit(20), ttl: 60_000 } })
   @ApiOperation({
     summary: 'Submit a Balanced Challenge slip (10 predictions, charges entry fee)',
   })

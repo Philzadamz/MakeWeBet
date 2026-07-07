@@ -11,6 +11,7 @@ import {
   ResetPasswordRequest,
 } from '@fiq/contracts';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { throttleLimit } from '../../common/throttle-limit';
 import { AuthService } from './auth.service';
 import { TokenService, type IssuedTokens } from './token.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
@@ -70,7 +71,7 @@ export class AuthController {
   }
 
   @Post('register')
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: throttleLimit(5), ttl: 60_000 } })
   @ApiHeader({ name: 'x-client', required: false, description: '"mobile" to receive refreshToken in body' })
   @ApiOperation({ summary: 'Create an account (wallet is created atomically)' })
   async register(
@@ -83,7 +84,7 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(200)
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle({ default: { limit: throttleLimit(10), ttl: 60_000 } })
   async login(
     @Body(new ZodValidationPipe(LoginRequest)) dto: LoginRequest,
     @Req() req: Request,
@@ -133,7 +134,7 @@ export class AuthController {
 
   @Post('forgot-password')
   @HttpCode(202)
-  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Throttle({ default: { limit: throttleLimit(3), ttl: 60_000 } })
   async forgotPassword(
     @Body(new ZodValidationPipe(ForgotPasswordRequest)) dto: ForgotPasswordRequest,
   ) {

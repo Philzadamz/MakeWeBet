@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import type Redis from 'ioredis';
 import { REDIS } from '../../infrastructure/redis/redis.module';
@@ -6,7 +6,7 @@ import { REDIS } from '../../infrastructure/redis/redis.module';
 export const CONTEST_LIFECYCLE_QUEUE = 'contest-lifecycle';
 
 @Injectable()
-export class ContestQueue {
+export class ContestQueue implements OnModuleDestroy {
   private readonly queue: Queue;
 
   constructor(@Inject(REDIS) redis: Redis) {
@@ -19,7 +19,13 @@ export class ContestQueue {
     await this.queue.add(
       'lock',
       { contestId },
-      { jobId: `lock:${contestId}`, delay, attempts: 3, removeOnComplete: 1000 },
+      // BullMQ rejects custom job IDs containing ':' — it's the internal
+      // Redis key delimiter between prefix/queue-name/jobId.
+      { jobId: `lock-${contestId}`, delay, attempts: 3, removeOnComplete: 1000 },
     );
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.queue.close();
   }
 }

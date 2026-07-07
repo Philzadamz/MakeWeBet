@@ -13,6 +13,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AddBankAccountRequest, RequestWithdrawalRequest } from '@fiq/contracts';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { throttleLimit } from '../../common/throttle-limit';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
@@ -57,7 +58,7 @@ export class WithdrawalsController {
 
   @Post('withdrawals/otp')
   @HttpCode(202)
-  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Throttle({ default: { limit: throttleLimit(3), ttl: 60_000 } })
   @ApiOperation({ summary: 'Send a step-up OTP for withdrawal confirmation' })
   async otp(@CurrentUser() user: AuthenticatedUser) {
     await this.withdrawals.requestOtp(user.userId);
@@ -65,7 +66,7 @@ export class WithdrawalsController {
   }
 
   @Post('withdrawals')
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: throttleLimit(5), ttl: 60_000 } })
   @ApiOperation({ summary: 'Request a withdrawal (OTP-gated; places a ledger hold)' })
   request(
     @CurrentUser() user: AuthenticatedUser,

@@ -12,6 +12,8 @@
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "test": "turbo run test",
+    "test:e2e": "pnpm --filter api test:e2e",
+    "load-test": "k6 run load-tests/read-endpoints.js",
     "typecheck": "turbo run typecheck",
     "db:migrate": "pnpm --filter api prisma:migrate",
     "db:generate": "pnpm --filter api prisma:generate",

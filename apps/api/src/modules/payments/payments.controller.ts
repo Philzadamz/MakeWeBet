@@ -17,6 +17,7 @@ import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import { InitiateDepositRequest } from '@fiq/contracts';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { throttleLimit } from '../../common/throttle-limit';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
@@ -34,7 +35,7 @@ export class PaymentsController {
   @Post('deposits')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle({ default: { limit: throttleLimit(10), ttl: 60_000 } })
   @ApiOperation({ summary: 'Start a wallet deposit; returns hosted checkout URL' })
   initiate(
     @CurrentUser() user: AuthenticatedUser,

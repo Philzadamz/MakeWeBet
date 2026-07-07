@@ -35,9 +35,28 @@ export class DomainEventsWorker implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
     if (!this.config.get<boolean>('RUN_WORKERS')) return;
+    // A Worker holds its Redis connection open on a blocking read waiting
+    // for new jobs; sharing that connection with anything else (the
+    // outbox relay's Queue.add() calls, pub/sub, etc.) starves it of
+    // notifications for jobs added while it's mid-block. Needs its own.
+    //
+    // concurrency IS 1 DELIBERATELY. Under e2e load (5 results finalized in
+    // a tight loop, real Prisma transaction work per job), concurrency:5
+    // intermittently failed to invoke the processor for some same-tick
+    // jobs — no thrown error, no 'failed' event, the callback simply never
+    // ran. A minimal bullmq+ioredis repro at the same versions did NOT
+    // reproduce it, and the failure rate dropped further once an unrelated
+    // competing local process was killed — so host contention is a real
+    // contributing factor and the root cause isn't fully isolated. What's
+    // confirmed by 9+ consecutive clean e2e runs: concurrency:1 is
+    // reliable here. Given the cost of getting this wrong (a contest
+    // settling on partial scoring) versus the current event volume,
+    // sequential processing is the safe default — revisit only with a
+    // benchmark showing concurrency is needed AND a solid repro to verify
+    // any fix against.
     this.worker = new Worker(DOMAIN_EVENTS_QUEUE, (job) => this.route(job), {
-      connection: this.redis,
-      concurrency: 5,
+      connection: this.redis.duplicate(),
+      concurrency: 1,
     });
     this.worker.on('failed', (job, err) =>
       this.logger.error(`event ${job?.name}:${job?.id} failed: ${err.message}`),

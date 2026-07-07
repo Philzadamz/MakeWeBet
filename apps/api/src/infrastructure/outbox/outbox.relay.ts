@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { Queue } from 'bullmq';
 import type Redis from 'ioredis';
@@ -13,7 +13,7 @@ export const DOMAIN_EVENTS_QUEUE = 'domain-events';
  * mark-published cannot double-enqueue (BullMQ dedupes on job id).
  */
 @Injectable()
-export class OutboxRelay {
+export class OutboxRelay implements OnModuleDestroy {
   private readonly logger = new Logger(OutboxRelay.name);
   private readonly queue: Queue;
   private running = false;
@@ -63,5 +63,9 @@ export class OutboxRelay {
     } finally {
       this.running = false;
     }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.queue.close();
   }
 }

@@ -110,12 +110,26 @@ export class ScoringService {
     });
   }
 
-  /** When every fixture in the contest is final → SCORED, emit contest.scored. */
+  /**
+   * When every fixture is final AND every prediction has actually been
+   * scored → SCORED, emit contest.scored. Both checks matter: an admin (or
+   * the results poller) can finalize several fixtures in quick succession,
+   * and resultFinalizedAt is set synchronously per request while the
+   * scoring worker processes each fixture's event asynchronously — so
+   * "all fixtures have results" can be briefly true before "all
+   * predictions are scored" is. Checking only the former let the contest
+   * jump to SCORED (and settlement run) on partial points.
+   */
   private async finalizeContestIfComplete(contestId: string): Promise<void> {
-    const pending = await this.prisma.contestMatch.count({
-      where: { contestId, fixture: { resultFinalizedAt: null } },
-    });
-    if (pending > 0) return;
+    const [pendingFixtures, pendingPredictions] = await Promise.all([
+      this.prisma.contestMatch.count({
+        where: { contestId, fixture: { resultFinalizedAt: null } },
+      }),
+      this.prisma.prediction.count({
+        where: { entry: { contestId }, scoredAt: null },
+      }),
+    ]);
+    if (pendingFixtures > 0 || pendingPredictions > 0) return;
 
     await this.prisma.$transaction(async (tx) => {
       const { count } = await tx.contest.updateMany({
