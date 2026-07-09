@@ -21,6 +21,7 @@ export const EventTopics = {
   WithdrawalFailed: 'withdrawal.failed',
   PaymentWebhookReceived: 'payment.webhook.received',
   UserRegistered: 'user.registered',
+  FixtureSynced: 'fixture.synced',
 } as const;
 
 export type EventTopic = (typeof EventTopics)[keyof typeof EventTopics];

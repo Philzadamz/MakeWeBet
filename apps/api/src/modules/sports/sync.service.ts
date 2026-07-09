@@ -1,13 +1,20 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
+import { EventTopics } from '@fiq/contracts';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
-import { DifficultyService } from '../difficulty/difficulty.service';
+import { OutboxService } from '../../infrastructure/outbox/outbox.service';
 import { SportsDataPort, type CanonicalFixture, type CanonicalTeam } from './ports/sports-data.port';
 
 /**
  * Pulls provider fixtures into the canonical tables. Everything is keyed by
  * (provider, providerRef) mapping rows, so re-syncing is idempotent and a
  * future provider swap never orphans historical data.
+ *
+ * Difficulty is NOT computed inline: it costs several provider calls per
+ * fixture (form ×2 + head-to-head) and rate-limited providers (football-
+ * data.org: 10 req/min) would hold the admin's sync request open for
+ * minutes. Instead each new fixture emits fixture.synced and the
+ * domain-events worker computes stars in the background.
  */
 @Injectable()
 export class SyncService {
@@ -16,7 +23,7 @@ export class SyncService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly sports: SportsDataPort,
-    private readonly difficulty: DifficultyService,
+    private readonly outbox: OutboxService,
   ) {}
 
   async syncDate(date: Date): Promise<{ created: number; updated: number }> {
@@ -42,7 +49,7 @@ export class SyncService {
       where: { provider_providerRef: { provider, providerRef: canonical.providerRef } },
     });
 
-    const leagueId = await this.resolveLeague(canonical.leagueRef);
+    const leagueId = await this.resolveLeague(canonical);
     const homeTeamId = await this.resolveTeam(canonical.homeTeam);
     const awayTeamId = await this.resolveTeam(canonical.awayTeam);
 
@@ -70,21 +77,22 @@ export class SyncService {
         providerRefs: { create: { provider, providerRef: canonical.providerRef } },
       },
     });
-    await this.difficulty.computeForFixture(fixture.id);
+    // Background difficulty computation — see class doc.
+    await this.outbox.emit(this.prisma, EventTopics.FixtureSynced, { fixtureId: fixture.id });
     return true;
   }
 
-  private async resolveLeague(leagueRef: string): Promise<string> {
+  private async resolveLeague(canonical: CanonicalFixture): Promise<string> {
     const provider = this.sports.provider;
     const existing = await this.prisma.leagueProviderRef.findUnique({
-      where: { provider_providerRef: { provider, providerRef: leagueRef } },
+      where: { provider_providerRef: { provider, providerRef: canonical.leagueRef } },
     });
     if (existing) return existing.leagueId;
     const league = await this.prisma.league.create({
       data: {
-        name: `League ${leagueRef}`, // enriched by a later metadata sync
-        country: 'Unknown',
-        providerRefs: { create: { provider, providerRef: leagueRef } },
+        name: canonical.leagueName ?? `League ${canonical.leagueRef}`,
+        country: canonical.leagueCountry ?? 'Unknown',
+        providerRefs: { create: { provider, providerRef: canonical.leagueRef } },
       },
     });
     return league.id;

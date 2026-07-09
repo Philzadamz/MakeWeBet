@@ -16,6 +16,9 @@ export interface CanonicalTeam {
 export interface CanonicalFixture {
   providerRef: string;
   leagueRef: string;
+  /** Human-readable competition metadata, used when first creating the league row. */
+  leagueName?: string;
+  leagueCountry?: string;
   homeTeam: CanonicalTeam;
   awayTeam: CanonicalTeam;
   kickoffAt: Date;

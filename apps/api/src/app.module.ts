@@ -31,7 +31,17 @@ import { LiveModule } from './modules/live/live.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validate: validateEnv,
+      // Under test, config comes EXCLUSIVELY from test/env.ts via
+      // process.env. Values parsed from the .env file win over pre-set
+      // process.env in the validated-config lookup, so a dev .env would
+      // otherwise leak real gateway keys — and worse, the dev REDIS_URL —
+      // into the test app (a running dev server then steals the test's
+      // BullMQ jobs, which looks like the worker silently dropping them).
+      ignoreEnvFile: process.env.NODE_ENV === 'test',
+    }),
     EventEmitterModule.forRoot(),
     ScheduleModule.forRoot(),
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),

@@ -48,6 +48,15 @@ export class ScoringService {
     result: FinalResult,
   ): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
+      // Serialize scoring PER CONTEST (held until tx end). Without this,
+      // two workers scoring different fixtures of the same contest race on
+      // the entry-aggregate recompute below: each reads a snapshot that
+      // can't see the other's uncommitted prediction updates, and the
+      // later entry.update erases the earlier fixture's points — contests
+      // observably settled at 120.0 instead of 150.0 under concurrency.
+      // Different contests still score in parallel.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${contestId})::bigint)`;
+
       // First result flips the contest into SCORING (idempotent).
       await tx.contest.updateMany({
         where: { id: contestId, status: 'LOCKED' },

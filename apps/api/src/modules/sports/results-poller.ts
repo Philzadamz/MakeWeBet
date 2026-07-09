@@ -58,12 +58,23 @@ export class ResultsPoller {
             remote.homeGoals !== undefined &&
             remote.awayGoals !== undefined
           ) {
+            // MONEY-GRADE GUARD: FIRST_TEAM_TO_SCORE settles real prizes.
+            // If the provider can't tell us who scored first (both sides
+            // scored, no goal feed), leave the fixture for manual result
+            // entry rather than guess.
+            if (remote.firstToScore === undefined) {
+              this.logger.warn(
+                `fixture ${fixture.id} finished ${remote.homeGoals}-${remote.awayGoals} but ` +
+                  `first scorer is unknown from provider — needs manual result entry`,
+              );
+              continue;
+            }
             await this.results.finalize(fixture.id, {
               homeGoals: remote.homeGoals,
               awayGoals: remote.awayGoals,
               htHomeGoals: remote.htHomeGoals ?? 0,
               htAwayGoals: remote.htAwayGoals ?? 0,
-              firstToScore: remote.firstToScore ?? 'NONE',
+              firstToScore: remote.firstToScore,
             });
             this.logger.log(
               `auto-finalized fixture ${fixture.id}: ${remote.homeGoals}-${remote.awayGoals}`,

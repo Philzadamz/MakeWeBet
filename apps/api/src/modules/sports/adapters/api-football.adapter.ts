@@ -61,21 +61,29 @@ export class ApiFootballAdapter extends SportsDataPort {
     if (!item) return null;
     const fixture = this.toCanonical(item);
 
-    // First scorer needs the events feed; only fetch once goals exist.
+    // First scorer: derivable from a goalless/one-sided scoreline without
+    // burning an events call; only a both-scored match needs the feed.
     if (fixture.status === 'FINISHED') {
-      const total = (fixture.homeGoals ?? 0) + (fixture.awayGoals ?? 0);
-      if (total === 0) {
+      const home = fixture.homeGoals ?? 0;
+      const away = fixture.awayGoals ?? 0;
+      if (home + away === 0) {
         fixture.firstToScore = 'NONE';
+      } else if (home > 0 && away === 0) {
+        fixture.firstToScore = 'HOME';
+      } else if (away > 0 && home === 0) {
+        fixture.firstToScore = 'AWAY';
       } else {
         const events = await this.http.get('/fixtures/events', {
           params: { fixture: providerRef, type: 'Goal' },
         });
         const first = (events.data.response as { team: { id: number } }[])[0];
+        // No feed data for a both-scored match → leave undefined; the
+        // results poller then routes it to manual entry instead of guessing.
         fixture.firstToScore = first
           ? String(first.team.id) === fixture.homeTeam.providerRef
             ? 'HOME'
             : 'AWAY'
-          : 'NONE';
+          : undefined;
       }
     }
     return fixture;
@@ -134,6 +142,8 @@ export class ApiFootballAdapter extends SportsDataPort {
     return {
       providerRef: String(f.fixture.id),
       leagueRef: String(f.league.id),
+      leagueName: f.league.name,
+      leagueCountry: f.league.country,
       homeTeam: {
         providerRef: String(f.teams.home.id),
         name: f.teams.home.name,

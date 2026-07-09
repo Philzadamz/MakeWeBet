@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
 import swc from 'unplugin-swc';
+import { TEST_ENV } from './test/env';
 
 /**
  * e2e config is separate from the unit vitest.config.ts on purpose:
@@ -20,6 +21,10 @@ export default defineConfig({
     include: ['test/**/*.e2e-spec.ts'],
     environment: 'node',
     globalSetup: ['test/global-setup.ts'],
+    // Applied BEFORE test files import app.module — which is when
+    // @nestjs/config snapshots the environment. See test/env.ts for the
+    // full story; setting env any later than this does not work.
+    env: TEST_ENV,
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 60_000,

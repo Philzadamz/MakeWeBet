@@ -11,6 +11,7 @@ import { SettlementService } from '../settlement/settlement.service';
 import { StatsService } from '../stats/stats.service';
 import { WithdrawalsService } from '../withdrawals/withdrawals.service';
 import { LivePublisher } from '../live/live-publisher.service';
+import { DifficultyService } from '../difficulty/difficulty.service';
 
 /**
  * Routes outbox-relayed domain events to their handlers. Delivery is
@@ -31,6 +32,7 @@ export class DomainEventsWorker implements OnModuleInit, OnModuleDestroy {
     private readonly withdrawals: WithdrawalsService,
     private readonly prisma: PrismaService,
     private readonly live: LivePublisher,
+    private readonly difficulty: DifficultyService,
   ) {}
 
   onModuleInit(): void {
@@ -40,23 +42,18 @@ export class DomainEventsWorker implements OnModuleInit, OnModuleDestroy {
     // outbox relay's Queue.add() calls, pub/sub, etc.) starves it of
     // notifications for jobs added while it's mid-block. Needs its own.
     //
-    // concurrency IS 1 DELIBERATELY. Under e2e load (5 results finalized in
-    // a tight loop, real Prisma transaction work per job), concurrency:5
-    // intermittently failed to invoke the processor for some same-tick
-    // jobs — no thrown error, no 'failed' event, the callback simply never
-    // ran. A minimal bullmq+ioredis repro at the same versions did NOT
-    // reproduce it, and the failure rate dropped further once an unrelated
-    // competing local process was killed — so host contention is a real
-    // contributing factor and the root cause isn't fully isolated. What's
-    // confirmed by 9+ consecutive clean e2e runs: concurrency:1 is
-    // reliable here. Given the cost of getting this wrong (a contest
-    // settling on partial scoring) versus the current event volume,
-    // sequential processing is the safe default — revisit only with a
-    // benchmark showing concurrency is needed AND a solid repro to verify
-    // any fix against.
+    // Concurrency post-mortem — two entangled bugs once hid here:
+    //  1. "Jobs silently dropped" was test-env contamination: the dev
+    //     .env's REDIS_URL leaked into e2e (config snapshots env at import
+    //     time) and a running dev server consumed the test app's jobs.
+    //     Fixed via vitest test.env + ignoreEnvFile (see test/env.ts).
+    //  2. A REAL lost-update race: concurrent scoring of two fixtures of
+    //     the same contest clobbered each other's entry aggregates (settled
+    //     at 120.0/150.0). Fixed with a per-contest advisory lock in
+    //     ScoringService — which is what makes concurrency>1 safe here.
     this.worker = new Worker(DOMAIN_EVENTS_QUEUE, (job) => this.route(job), {
       connection: this.redis.duplicate(),
-      concurrency: 1,
+      concurrency: 5,
     });
     this.worker.on('failed', (job, err) =>
       this.logger.error(`event ${job?.name}:${job?.id} failed: ${err.message}`),
@@ -86,6 +83,11 @@ export class DomainEventsWorker implements OnModuleInit, OnModuleDestroy {
       case EventTopics.ContestLocked:
       case EventTopics.ContestCancelled:
         await this.pushLive(envelope.payload.contestId!, 'contest:status');
+        break;
+      case EventTopics.FixtureSynced:
+        // May take multiple rate-limited provider calls — exactly why it
+        // runs here (background, serialized) and not inline with sync.
+        await this.difficulty.computeForFixture(envelope.payload.fixtureId!);
         break;
       case EventTopics.PaymentWebhookReceived: {
         const { event, reference } = envelope.payload;
