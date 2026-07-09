@@ -50,8 +50,11 @@ export class FootballDataAdapter extends SportsDataPort {
 
   async getFixturesByDate(date: Date): Promise<CanonicalFixture[]> {
     const day = date.toISOString().slice(0, 10);
+    // dateTo is EXCLUSIVE on this API (dateFrom=X&dateTo=X returns nothing,
+    // verified against live) — query the half-open interval [day, day+1).
+    const next = new Date(date.getTime() + 24 * 3600 * 1000).toISOString().slice(0, 10);
     const data = await this.request<{ matches: FdMatch[] }>(
-      `/matches?dateFrom=${day}&dateTo=${day}`,
+      `/matches?dateFrom=${day}&dateTo=${next}`,
     );
     return data.matches.map((m) => toCanonicalFixture(m));
   }
