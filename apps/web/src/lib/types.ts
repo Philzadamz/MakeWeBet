@@ -13,6 +13,8 @@ export interface ContestListItem {
   maxEntries: number | null;
   entryCount: number;
   estimatedPrizePoolMinor: string;
+  /** Present on the public list endpoint only (not admin). */
+  matchups?: { home: string; away: string; kickoffAt: string }[];
 }
 
 export interface ContestTeam {

@@ -19,8 +19,9 @@ export default function LoginPage() {
     setBusy(true);
     setError(null);
     try {
-      await login(String(form.get('identifier')), String(form.get('password')));
-      router.push('/contests');
+      const { role } = await login(String(form.get('identifier')), String(form.get('password')));
+      // Staff land on the admin overview; players land on the contests list.
+      router.push(role !== 'USER' ? '/admin' : '/contests');
     } catch (err) {
       setError(apiError(err));
     } finally {

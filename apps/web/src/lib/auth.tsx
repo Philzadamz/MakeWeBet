@@ -15,9 +15,20 @@ export interface Me {
 interface AuthContextValue {
   user: Me | null;
   ready: boolean;
-  login: (identifier: string, password: string) => Promise<void>;
+  /** Resolves with the account's role so callers can route staff to /admin. */
+  login: (identifier: string, password: string) => Promise<{ role: string }>;
   register: (email: string, username: string, password: string) => Promise<void>;
   logout: () => void;
+}
+
+/** Role claim from the (unverified, display-only) JWT payload. */
+function roleFromToken(accessToken: string): string {
+  try {
+    const payload = JSON.parse(atob(accessToken.split('.')[1] ?? '')) as { role?: string };
+    return payload.role ?? 'USER';
+  } catch {
+    return 'USER';
+  }
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -56,6 +67,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     login: async (identifier, password) => {
       const { data } = await api.post('/auth/login', { identifier, password });
       await applyTokens(data);
+      return { role: roleFromToken(data.accessToken) };
     },
     register: async (email, username, password) => {
       const { data } = await api.post('/auth/register', { email, username, password });

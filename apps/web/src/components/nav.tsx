@@ -56,9 +56,12 @@ export function Nav() {
               <Link href="/wallet" className="rounded-lg px-3 py-2 hover:bg-zinc-100 dark:hover:bg-zinc-800">
                 Wallet
               </Link>
-              <Link href="/profile" className="rounded-lg px-3 py-2 hover:bg-zinc-100 dark:hover:bg-zinc-800">
-                My IQ
-              </Link>
+              {/* My IQ is a player's prediction record — meaningless for staff accounts. */}
+              {user.role === 'USER' && (
+                <Link href="/profile" className="rounded-lg px-3 py-2 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                  My IQ
+                </Link>
+              )}
               {user.role !== 'USER' && (
                 <Link
                   href="/admin"

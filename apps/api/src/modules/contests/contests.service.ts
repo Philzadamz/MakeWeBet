@@ -257,9 +257,30 @@ export class ContestsService {
     const contests = await this.prisma.contest.findMany({
       where: { status: 'PUBLISHED', deletedAt: null, lockAt: { gt: new Date() } },
       orderBy: { lockAt: 'asc' },
-      include: { _count: { select: { entries: { where: { status: 'ACTIVE' } } } } },
+      include: {
+        _count: { select: { entries: { where: { status: 'ACTIVE' } } } },
+        matches: {
+          orderBy: { order: 'asc' },
+          include: {
+            fixture: {
+              select: {
+                kickoffAt: true,
+                homeTeam: { select: { name: true, shortName: true } },
+                awayTeam: { select: { name: true, shortName: true } },
+              },
+            },
+          },
+        },
+      },
     });
-    return contests.map((c) => this.toListItem(c, c._count.entries));
+    return contests.map((c) => ({
+      ...this.toListItem(c, c._count.entries),
+      matchups: c.matches.map((m) => ({
+        home: m.fixture.homeTeam.shortName ?? m.fixture.homeTeam.name,
+        away: m.fixture.awayTeam.shortName ?? m.fixture.awayTeam.name,
+        kickoffAt: m.fixture.kickoffAt,
+      })),
+    }));
   }
 
   async getBySlug(slug: string) {
