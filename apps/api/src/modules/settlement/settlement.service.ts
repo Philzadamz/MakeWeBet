@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { EventTopics } from '@fiq/contracts';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { OutboxService } from '../../infrastructure/outbox/outbox.service';
@@ -123,19 +124,29 @@ export class SettlementService {
         }
       }
 
-      // Final ranks for every entrant; entries settle; contest settles.
-      for (let i = 0; i < ranked.length; i++) {
-        await tx.entry.update({
-          where: { id: ranked[i]!.entryId },
-          data: { finalRank: i + 1, status: 'SETTLED' },
-        });
+      // Final ranks for every entrant in set-based batches — a per-entry
+      // UPDATE loop scales statements with the field size and would blow
+      // the transaction budget on a popular contest. Chunked to stay well
+      // under Postgres's 65,535 bind-parameter limit (2 params per row).
+      const CHUNK = 10_000;
+      for (let offset = 0; offset < ranked.length; offset += CHUNK) {
+        const chunk = ranked.slice(offset, offset + CHUNK);
+        const rows = chunk.map((r, i) =>
+          Prisma.sql`(${r.entryId}::uuid, ${offset + i + 1}::int)`,
+        );
+        await tx.$executeRaw(Prisma.sql`
+          UPDATE entries e
+          SET "finalRank" = v.rank, status = 'SETTLED'
+          FROM (VALUES ${Prisma.join(rows)}) AS v(id, rank)
+          WHERE e.id = v.id
+        `);
       }
       await tx.contest.update({
         where: { id: contestId },
         data: { status: 'SETTLED', settledAt: new Date() },
       });
       await this.outbox.emit(tx, EventTopics.PrizesDistributed, { contestId });
-    });
+    }, { timeout: 60_000 });
 
     this.logger.log(`contest ${contestId} settled (${ranked.length} entries)`);
   }

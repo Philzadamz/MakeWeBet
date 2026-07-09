@@ -47,76 +47,101 @@ export class ScoringService {
     contestMatchId: string,
     result: FinalResult,
   ): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
-      // Serialize scoring PER CONTEST (held until tx end). Without this,
-      // two workers scoring different fixtures of the same contest race on
-      // the entry-aggregate recompute below: each reads a snapshot that
-      // can't see the other's uncommitted prediction updates, and the
-      // later entry.update erases the earlier fixture's points — contests
-      // observably settled at 120.0 instead of 150.0 under concurrency.
-      // Different contests still score in parallel.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${contestId})::bigint)`;
+    await this.prisma.$transaction(
+      async (tx) => {
+        // Serialize scoring PER CONTEST (held until tx end). Without this,
+        // two workers scoring different fixtures of the same contest race on
+        // the entry-aggregate recompute below: each reads a snapshot that
+        // can't see the other's uncommitted prediction updates, and the
+        // later write erases the earlier fixture's points — contests
+        // observably settled at 120.0 instead of 150.0 under concurrency.
+        // Different contests still score in parallel.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${contestId})::bigint)`;
 
-      // First result flips the contest into SCORING (idempotent).
-      await tx.contest.updateMany({
-        where: { id: contestId, status: 'LOCKED' },
-        data: { status: 'SCORING' },
-      });
+        // First result flips the contest into SCORING (idempotent).
+        await tx.contest.updateMany({
+          where: { id: contestId, status: 'LOCKED' },
+          data: { status: 'SCORING' },
+        });
 
-      const contest = await tx.contest.findUniqueOrThrow({
-        where: { id: contestId },
-        include: { ruleSet: { include: { marketRules: true } } },
-      });
-      const pointsByMarket = new Map(
-        contest.ruleSet.marketRules.map((r) => [r.marketType, r.pointsX10]),
-      );
-
-      const predictions = await tx.prediction.findMany({
-        where: { slot: { contestMatchId } },
-        include: { slot: { select: { tier: true } } },
-      });
-
-      const affectedEntries = new Set<string>();
-      for (const p of predictions) {
-        const scored = scorePrediction(
-          p.marketType,
-          p.selection,
-          result,
-          pointsByMarket.get(p.marketType) ?? 0,
+        const contest = await tx.contest.findUniqueOrThrow({
+          where: { id: contestId },
+          include: { ruleSet: { include: { marketRules: true } } },
+        });
+        const pointsByMarket = new Map(
+          contest.ruleSet.marketRules.map((r) => [r.marketType, r.pointsX10]),
         );
-        await tx.prediction.update({
-          where: { id: p.id },
-          data: { isCorrect: scored.isCorrect, pointsX10: scored.pointsX10, scoredAt: new Date() },
-        });
-        affectedEntries.add(p.entryId);
-      }
 
-      // Recompute aggregates from scratch — replay-safe by construction.
-      for (const entryId of affectedEntries) {
-        const scoredPredictions = await tx.prediction.findMany({
-          where: { entryId, scoredAt: { not: null } },
-          include: { slot: { select: { tier: true } } },
+        const predictions = await tx.prediction.findMany({
+          where: { slot: { contestMatchId } },
+          select: { id: true, marketType: true, selection: true },
         });
-        await tx.entry.update({
-          where: { id: entryId },
-          data: {
-            totalPointsX10: scoredPredictions.reduce((s, p) => s + p.pointsX10, 0),
-            correctCount: scoredPredictions.filter((p) => p.isCorrect).length,
-            correctExpert: scoredPredictions.filter((p) => p.isCorrect && p.slot.tier === 'EXPERT')
-              .length,
-            correctHard: scoredPredictions.filter((p) => p.isCorrect && p.slot.tier === 'HARD')
-              .length,
-          },
-        });
-      }
 
-      // Lets live leaderboards tick mid-scoring, one event per match scored.
-      await this.outbox.emit(tx, EventTopics.PredictionScored, { contestId });
+        // Statement count must not scale with entry count (a popular
+        // contest = thousands of predictions per match; one UPDATE per row
+        // blows straight past any transaction timeout). Correctness is a
+        // pure function of (market, selection, result), so group identical
+        // picks and write each group with a single updateMany — dozens of
+        // statements at most, regardless of entries.
+        const groups = new Map<string, { ids: string[]; isCorrect: boolean; pointsX10: number }>();
+        for (const p of predictions) {
+          const key = `${p.marketType}|${p.selection}`;
+          let group = groups.get(key);
+          if (!group) {
+            const scored = scorePrediction(
+              p.marketType,
+              p.selection,
+              result,
+              pointsByMarket.get(p.marketType) ?? 0,
+            );
+            group = { ids: [], isCorrect: scored.isCorrect, pointsX10: scored.pointsX10 };
+            groups.set(key, group);
+          }
+          group.ids.push(p.id);
+        }
+        const scoredAt = new Date();
+        for (const group of groups.values()) {
+          await tx.prediction.updateMany({
+            where: { id: { in: group.ids } },
+            data: { isCorrect: group.isCorrect, pointsX10: group.pointsX10, scoredAt },
+          });
+        }
 
-      this.logger.log(
-        `scored ${predictions.length} predictions for contest ${contestId} match ${contestMatchId}`,
-      );
-    });
+        // Recompute every affected entry's aggregates from scratch in ONE
+        // set-based statement — replay-safe by construction, O(1) round trips.
+        await tx.$executeRaw`
+          UPDATE entries e SET
+            "totalPointsX10" = s.total,
+            "correctCount"   = s.correct,
+            "correctExpert"  = s.expert,
+            "correctHard"    = s.hard
+          FROM (
+            SELECT
+              p."entryId" AS entry_id,
+              COALESCE(SUM(p."pointsX10"), 0)::int AS total,
+              (COUNT(*) FILTER (WHERE p."isCorrect"))::int AS correct,
+              (COUNT(*) FILTER (WHERE p."isCorrect" AND cs.tier = 'EXPERT'))::int AS expert,
+              (COUNT(*) FILTER (WHERE p."isCorrect" AND cs.tier = 'HARD'))::int AS hard
+            FROM predictions p
+            JOIN contest_slots cs ON cs.id = p."slotId"
+            WHERE p."scoredAt" IS NOT NULL
+              AND cs."contestId" = ${contestId}::uuid
+            GROUP BY p."entryId"
+          ) s
+          WHERE e.id = s.entry_id
+        `;
+
+        // Lets live leaderboards tick mid-scoring, one event per match scored.
+        await this.outbox.emit(tx, EventTopics.PredictionScored, { contestId });
+
+        this.logger.log(
+          `scored ${predictions.length} predictions for contest ${contestId} match ${contestMatchId}`,
+        );
+      },
+      // Generous ceiling: the statement count is bounded by pick-diversity,
+      // not entries, but a huge contest still moves real data.
+      { timeout: 60_000 },
+    );
   }
 
   /**
