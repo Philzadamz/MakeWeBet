@@ -3,6 +3,7 @@ import {
   deriveFirstToScore,
   formFromMatches,
   h2hFromMatches,
+  hasKnownTeams,
   toCanonicalFixture,
   type FdMatch,
 } from './football-data.adapter';
@@ -66,6 +67,15 @@ describe('toCanonicalFixture', () => {
     );
     expect(canonical.homeGoals).toBeUndefined();
     expect(canonical.firstToScore).toBeUndefined();
+  });
+});
+
+describe('hasKnownTeams', () => {
+  it('rejects undecided knockout fixtures (TBD sides have null id/name)', () => {
+    expect(hasKnownTeams(match())).toBe(true);
+    // e.g. a World Cup final synced before the semifinals were played
+    expect(hasKnownTeams(match({ homeTeam: { id: null, name: null } }))).toBe(false);
+    expect(hasKnownTeams(match({ awayTeam: { id: null, name: null } }))).toBe(false);
   });
 });
 

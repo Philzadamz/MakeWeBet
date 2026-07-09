@@ -9,6 +9,7 @@ import { MockSportsAdapter } from './adapters/mock-sports.adapter';
 import { ResultsService } from './results.service';
 import { SyncService } from './sync.service';
 import { ResultsPoller } from './results-poller';
+import { FixturesSyncScheduler } from './fixtures-sync.scheduler';
 import { FixturesAdminController } from './fixtures-admin.controller';
 
 /**
@@ -52,6 +53,7 @@ import { FixturesAdminController } from './fixtures-admin.controller';
     ResultsService,
     SyncService,
     ResultsPoller,
+    FixturesSyncScheduler,
   ],
   exports: [ResultsService, SyncService, SportsDataPort],
 })

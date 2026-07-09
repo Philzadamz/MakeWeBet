@@ -56,7 +56,10 @@ export class FootballDataAdapter extends SportsDataPort {
     const data = await this.request<{ matches: FdMatch[] }>(
       `/matches?dateFrom=${day}&dateTo=${next}`,
     );
-    return data.matches.map((m) => toCanonicalFixture(m));
+    // Knockout fixtures can have TBD teams (null id/name) until the
+    // qualifying round finishes — e.g. a World Cup final before the semis
+    // are played. Skip them; the daily sweep picks them up once decided.
+    return data.matches.filter(hasKnownTeams).map((m) => toCanonicalFixture(m));
   }
 
   async getFixture(providerRef: string): Promise<CanonicalFixture | null> {
@@ -143,8 +146,9 @@ export interface FdMatch {
   status: string; // SCHEDULED|TIMED|IN_PLAY|PAUSED|FINISHED|POSTPONED|SUSPENDED|CANCELLED|AWARDED
   competition?: { id: number; name: string; code?: string };
   area?: { name?: string };
-  homeTeam: { id: number; name: string; shortName?: string; tla?: string; crest?: string };
-  awayTeam: { id: number; name: string; shortName?: string; tla?: string; crest?: string };
+  /** id/name are null for TBD sides of undecided knockout ties. */
+  homeTeam: { id: number | null; name: string | null; shortName?: string; tla?: string; crest?: string };
+  awayTeam: { id: number | null; name: string | null; shortName?: string; tla?: string; crest?: string };
   score: {
     fullTime: { home: number | null; away: number | null };
     halfTime: { home: number | null; away: number | null };
@@ -164,6 +168,16 @@ const STATUS_MAP: Record<string, CanonicalFixture['status']> = {
   CANCELLED: 'CANCELLED',
 };
 
+export function hasKnownTeams(m: FdMatch): boolean {
+  return (
+    m.homeTeam.id !== null &&
+    m.homeTeam.name !== null &&
+    m.awayTeam.id !== null &&
+    m.awayTeam.name !== null
+  );
+}
+
+/** Callers must filter with hasKnownTeams() first. */
 export function toCanonicalFixture(m: FdMatch): CanonicalFixture {
   return {
     providerRef: String(m.id),
@@ -171,14 +185,14 @@ export function toCanonicalFixture(m: FdMatch): CanonicalFixture {
     leagueName: m.competition?.name,
     leagueCountry: m.area?.name,
     homeTeam: {
-      providerRef: String(m.homeTeam.id),
-      name: m.homeTeam.name,
+      providerRef: String(m.homeTeam.id!),
+      name: m.homeTeam.name!,
       shortName: m.homeTeam.tla ?? m.homeTeam.shortName,
       logoUrl: m.homeTeam.crest,
     },
     awayTeam: {
-      providerRef: String(m.awayTeam.id),
-      name: m.awayTeam.name,
+      providerRef: String(m.awayTeam.id!),
+      name: m.awayTeam.name!,
       shortName: m.awayTeam.tla ?? m.awayTeam.shortName,
       logoUrl: m.awayTeam.crest,
     },
