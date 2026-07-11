@@ -35,41 +35,60 @@ export class UsersAdminController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'Search users by email/username; includes wallet balance' })
-  async list(@Query('q') q?: string) {
-    const users = await this.prisma.user.findMany({
-      where: q
-        ? {
-            OR: [
-              { email: { contains: q.toLowerCase() } },
-              { username: { contains: q.toLowerCase() } },
-            ],
-            deletedAt: null,
-          }
-        : { deletedAt: null },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-      select: {
-        id: true,
-        email: true,
-        username: true,
-        role: true,
-        status: true,
-        createdAt: true,
-        lastLoginAt: true,
-        ledgerAccounts: {
-          where: { type: 'USER_AVAILABLE' },
-          select: { balanceMinor: true },
+  @ApiOperation({ summary: 'Users, newest first — page-numbered so every account is reachable' })
+  async list(
+    @Query('q') q?: string,
+    @Query('page') pageRaw?: string,
+    @Query('pageSize') pageSizeRaw?: string,
+  ) {
+    const page = Math.max(1, Number(pageRaw) || 1);
+    const pageSize = Math.min(100, Math.max(5, Number(pageSizeRaw) || 20));
+    const where = q
+      ? {
+          OR: [
+            { email: { contains: q.toLowerCase() } },
+            { username: { contains: q.toLowerCase() } },
+          ],
+          deletedAt: null,
+        }
+      : { deletedAt: null };
+
+    const [total, users] = await Promise.all([
+      this.prisma.user.count({ where }),
+      this.prisma.user.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          email: true,
+          username: true,
+          role: true,
+          status: true,
+          createdAt: true,
+          lastLoginAt: true,
+          ledgerAccounts: {
+            where: { type: 'USER_AVAILABLE' },
+            select: { balanceMinor: true },
+          },
+          _count: { select: { entries: true, withdrawals: true } },
         },
-        _count: { select: { entries: true, withdrawals: true } },
-      },
-    });
-    return users.map(({ ledgerAccounts, _count, ...u }) => ({
-      ...u,
-      balanceMinor: ledgerAccounts[0]?.balanceMinor ?? 0n,
-      entries: _count.entries,
-      withdrawals: _count.withdrawals,
-    }));
+      }),
+    ]);
+
+    return {
+      items: users.map(({ ledgerAccounts, _count, ...u }) => ({
+        ...u,
+        balanceMinor: ledgerAccounts[0]?.balanceMinor ?? 0n,
+        entries: _count.entries,
+        withdrawals: _count.withdrawals,
+      })),
+      total,
+      page,
+      pageSize,
+      pageCount: Math.max(1, Math.ceil(total / pageSize)),
+    };
   }
 
   @Post(':id/suspend')

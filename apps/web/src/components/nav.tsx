@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Moon, Sun, Trophy, Wallet } from 'lucide-react';
+import { Moon, Sun, TrendingUp, Trophy, Wallet } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { ngn } from '@/lib/format';
@@ -32,12 +32,22 @@ function DarkToggle() {
 
 export function Nav() {
   const { user, logout } = useAuth();
+  const isStaff = user !== null && user.role !== 'USER';
 
+  // Players see their own wallet; staff see platform revenue instead —
+  // a staff account's (usually empty) personal balance is just noise.
   const { data: wallet } = useQuery({
     queryKey: ['wallet'],
-    enabled: user !== null,
+    enabled: user !== null && !isStaff,
     refetchInterval: 30_000,
     queryFn: async () => (await api.get<{ balanceMinor: string }>('/wallet')).data,
+  });
+  const { data: overview } = useQuery({
+    queryKey: ['admin-overview'], // shared with the admin overview page cache
+    enabled: isStaff,
+    refetchInterval: 30_000,
+    queryFn: async () =>
+      (await api.get<{ platformRevenueMinor: string }>('/admin/reports/overview')).data,
   });
 
   return (
@@ -77,7 +87,17 @@ export function Nav() {
           <DarkToggle />
           {user ? (
             <>
-              {wallet && (
+              {isStaff && overview && (
+                <Link
+                  href="/admin"
+                  title="Platform revenue"
+                  className="flex items-center gap-1.5 rounded-full bg-pitch-500/10 px-3 py-1.5 text-sm font-semibold text-pitch-600 dark:text-pitch-500"
+                >
+                  <TrendingUp size={14} />
+                  {ngn(overview.platformRevenueMinor)}
+                </Link>
+              )}
+              {!isStaff && wallet && (
                 <Link
                   href="/wallet"
                   className="flex items-center gap-1.5 rounded-full bg-pitch-500/10 px-3 py-1.5 text-sm font-semibold text-pitch-600 dark:text-pitch-500"
